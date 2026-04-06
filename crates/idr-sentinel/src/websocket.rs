@@ -8,12 +8,12 @@ use axum::{
     extract::State,
     response::IntoResponse,
     routing::get,
-    Router,
+    Json, Router,
 };
 use idr_common::events::IdrEvent;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info};
 
 pub struct DashboardServer {
@@ -34,10 +34,20 @@ impl DashboardServer {
             event_tx: self.event_tx,
         });
 
+        // Restrict CORS to localhost origins only
+        let cors = CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(|origin, _| {
+                origin.as_bytes().starts_with(b"http://127.0.0.1")
+                    || origin.as_bytes().starts_with(b"http://localhost")
+                    || origin.as_bytes().starts_with(b"http://[::1]")
+            }))
+            .allow_methods([http::Method::GET]);
+
         let app = Router::new()
             .route("/ws/events", get(ws_handler))
             .route("/api/health", get(health_handler))
-            .layer(CorsLayer::permissive())
+            .route("/api/alerts", get(alerts_handler))
+            .layer(cors)
             .with_state(state);
 
         let listener = tokio::net::TcpListener::bind(&self.addr).await?;
@@ -89,4 +99,11 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<IdrEvent>)
 
 async fn health_handler() -> &'static str {
     "IDR Sentinel Engine — operational"
+}
+
+async fn alerts_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "message": "Alert query endpoint — connect via WebSocket for real-time events"
+    }))
 }

@@ -11,30 +11,23 @@ use anyhow::Result;
 use idr_common::config::IdrConfig;
 use idr_common::events::IdrEvent;
 use idr_common::reputation::ReputationDb;
-use idr_ebpf::igmp::IgmpCorrelator;
-use idr_ebpf::lineage::LineageTracker;
-use idr_ebpf::physics::PhysicsMonitor;
 use idr_hardware::arp::ArpMonitor;
 use idr_hardware::nvme::NvmeWatchdog;
 use idr_hardware::rtc::RtcWatchdog;
-use idr_network::octet::OctetReversalDetector;
-use idr_network::ntp::NtpMonitor;
 use idr_network::zeek::ZeekIngestor;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
-
-use crate::correlator::SentinelCorrelator;
-use crate::panic_response::PanicResponder;
-use crate::websocket::DashboardServer;
 
 mod correlator;
 mod panic_response;
 mod websocket;
 
+use correlator::SentinelCorrelator;
+use websocket::DashboardServer;
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize structured logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -45,18 +38,13 @@ async fn main() -> Result<()> {
 
     info!("IDR Sentinel Engine starting — DPRK-001 campaign detection active");
 
-    // Load configuration
     let config = load_config()?;
     let reputation = Arc::new(ReputationDb::new());
 
-    // Event pipeline: all layers send events here
     let (event_tx, event_rx) = mpsc::channel::<IdrEvent>(4096);
-
-    // Broadcast channel for the dashboard WebSocket
     let (dashboard_tx, _) = broadcast::channel::<IdrEvent>(1024);
     let dashboard_tx_clone = dashboard_tx.clone();
 
-    // Apply sysctl hardening
     apply_sysctl_hardening();
 
     // === Layer 1: Kernel (eBPF) ===
@@ -64,8 +52,6 @@ async fn main() -> Result<()> {
     let kernel_config = config.kernel.clone();
     tokio::spawn(async move {
         info!("Starting Kernel Layer (eBPF)...");
-        // In production, load real eBPF programs here
-        // For now, the loader runs in stub mode
         match idr_ebpf::loader::EbpfLoader::load(&kernel_config, "").await {
             Ok(mut loader) => {
                 if let Err(e) = loader.poll_events(kernel_tx).await {
@@ -102,7 +88,6 @@ async fn main() -> Result<()> {
         let nvme_config = hw_config.clone();
         let arp_config = hw_config.clone();
 
-        // NVMe watchdog
         tokio::spawn(async move {
             let mut watchdog = NvmeWatchdog::new(&nvme_config);
             if let Err(e) = watchdog.run(nvme_tx).await {
@@ -110,7 +95,6 @@ async fn main() -> Result<()> {
             }
         });
 
-        // ARP/MAC monitor
         tokio::spawn(async move {
             let mut monitor = ArpMonitor::new(&arp_config);
             if let Err(e) = monitor.run(arp_tx).await {
@@ -118,7 +102,6 @@ async fn main() -> Result<()> {
             }
         });
 
-        // RTC watchdog
         tokio::spawn(async move {
             let mut rtc = RtcWatchdog::new();
             if let Err(e) = rtc.run(rtc_tx).await {
@@ -144,7 +127,6 @@ async fn main() -> Result<()> {
 }
 
 fn load_config() -> Result<IdrConfig> {
-    // Try loading from config file, fall back to defaults
     let config_path = std::env::var("IDR_CONFIG")
         .unwrap_or_else(|_| "/etc/idr/config.json".to_string());
 
@@ -161,7 +143,6 @@ fn load_config() -> Result<IdrConfig> {
     }
 }
 
-/// Apply kernel sysctl hardening for BPF JIT and unprivileged access
 fn apply_sysctl_hardening() {
     let sysctls = [
         ("net.core.bpf_jit_harden", "2"),

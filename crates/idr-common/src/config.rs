@@ -151,3 +151,92 @@ impl Default for DashboardConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config_valid() {
+        let config = IdrConfig::default();
+
+        // Kernel config defaults
+        assert_eq!(config.kernel.igmp_correlation_window_ms, 500);
+        assert_eq!(config.kernel.xdp_interface, "eth0");
+        assert!(!config.kernel.high_trust_asn_prefixes.is_empty());
+        assert_eq!(config.kernel.suspicious_ttl, 63);
+        assert!(config.kernel.suspicious_rtt_ms > 0.0);
+
+        // Network config defaults
+        assert!(!config.network.zeek_socket_path.is_empty());
+        assert_eq!(config.network.ntp_shift_threshold_secs, 300.0);
+        assert_eq!(config.network.tls_flag_count_after_ntp, 10);
+        assert!(!config.network.residential_asns.is_empty());
+
+        // Hardware config defaults
+        assert!(!config.hardware.nvme_device.is_empty());
+        assert!(config.hardware.nvme_deviation_threshold_pct > 0.0);
+
+        // Sentinel config defaults
+        assert!(!config.sentinel.auto_panic_enabled);
+        assert!(!config.sentinel.allow_nvme_erase);
+        assert!(!config.sentinel.ws_listen_addr.is_empty());
+
+        // Dashboard config defaults
+        assert!(!config.dashboard.listen_addr.is_empty());
+    }
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = IdrConfig::default();
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&config).expect("serialization failed");
+
+        // Deserialize back
+        let deserialized: IdrConfig =
+            serde_json::from_str(&json).expect("deserialization failed");
+
+        // Verify key fields match (no PartialEq derive, so check field by field)
+        assert_eq!(
+            deserialized.kernel.igmp_correlation_window_ms,
+            config.kernel.igmp_correlation_window_ms
+        );
+        assert_eq!(
+            deserialized.kernel.xdp_interface,
+            config.kernel.xdp_interface
+        );
+        assert_eq!(
+            deserialized.kernel.suspicious_ttl,
+            config.kernel.suspicious_ttl
+        );
+        assert_eq!(
+            deserialized.network.ntp_shift_threshold_secs,
+            config.network.ntp_shift_threshold_secs
+        );
+        assert_eq!(
+            deserialized.network.tls_flag_count_after_ntp,
+            config.network.tls_flag_count_after_ntp
+        );
+        assert_eq!(
+            deserialized.sentinel.auto_panic_enabled,
+            config.sentinel.auto_panic_enabled
+        );
+        assert_eq!(
+            deserialized.sentinel.allow_nvme_erase,
+            config.sentinel.allow_nvme_erase
+        );
+        assert_eq!(
+            deserialized.dashboard.listen_addr,
+            config.dashboard.listen_addr
+        );
+        assert_eq!(
+            deserialized.hardware.nvme_device,
+            config.hardware.nvme_device
+        );
+
+        // Also verify re-serialization produces the same JSON
+        let json2 = serde_json::to_string(&deserialized).expect("re-serialization failed");
+        assert_eq!(json, json2);
+    }
+}

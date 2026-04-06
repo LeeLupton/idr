@@ -1,0 +1,20 @@
+[package]
+name = "idr-sim"
+description = "Event simulator for testing the IDR pipeline without root/eBPF"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "idr-sim"
+path = "src/main.rs"
+
+[dependencies]
+idr-common = { path = "../idr-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rand = "0.9"

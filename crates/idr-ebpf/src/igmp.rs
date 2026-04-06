@@ -7,7 +7,6 @@
 use idr_common::events::{EventKind, EventSource, IdrEvent, Severity};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 

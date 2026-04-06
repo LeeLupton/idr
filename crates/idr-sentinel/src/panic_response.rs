@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 
 pub struct PanicResponder {
     interface: String,
+    nvme_device: String,
     allow_nvme_erase: bool,
     auto_enabled: bool,
 }
@@ -17,9 +18,17 @@ impl PanicResponder {
     pub fn new(config: &SentinelConfig) -> Self {
         Self {
             interface: config.panic_interface.clone(),
+            nvme_device: String::from("/dev/nvme0n1"),
             allow_nvme_erase: config.allow_nvme_erase,
             auto_enabled: config.auto_panic_enabled,
         }
+    }
+
+    /// Set the NVMe device path from hardware config
+    #[allow(dead_code)]
+    pub fn with_nvme_device(mut self, device: &str) -> Self {
+        self.nvme_device = device.to_string();
+        self
     }
 
     /// Execute the panic response sequence
@@ -31,10 +40,8 @@ impl PanicResponder {
 
         error!("=== PANIC RESPONSE EXECUTING ===");
 
-        // Step 1: Kill network interface immediately
         self.kill_network().await;
 
-        // Step 2: NVMe crypto-erase if enabled
         if self.allow_nvme_erase {
             self.nvme_crypto_erase().await;
         }
@@ -72,11 +79,10 @@ impl PanicResponder {
     }
 
     async fn nvme_crypto_erase(&self) {
-        error!("PANIC: Initiating NVMe cryptographic erase (ses=2)");
+        error!(device = %self.nvme_device, "PANIC: Initiating NVMe cryptographic erase (ses=2)");
 
-        // This is intentionally destructive — only runs if user explicitly enabled
         let result = tokio::process::Command::new("nvme")
-            .args(["format", "/dev/nvme0n1", "--ses=2"])
+            .args(["format", &self.nvme_device, "--ses=2"])
             .output()
             .await;
 

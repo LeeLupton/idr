@@ -104,14 +104,12 @@ impl LineageTracker {
     /// Process a socket lineage event. Returns a SuspiciousBeacon event if
     /// an unsigned/non-standard binary is connecting to a high-trust IP.
     pub fn process(&mut self, event: &IdrEvent) -> Option<IdrEvent> {
-        let (pid, tgid, dst_ip_str, dst_port) = match &event.kind {
+        let (pid, dst_ip_str) = match &event.kind {
             EventKind::SocketLineage {
                 pid,
-                tgid,
                 dst_ip,
-                dst_port,
                 ..
-            } => (*pid, *tgid, dst_ip.clone(), *dst_port),
+            } => (*pid, dst_ip.clone()),
             _ => return None,
         };
 

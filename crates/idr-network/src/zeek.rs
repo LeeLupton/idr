@@ -17,41 +17,22 @@ use tracing::{debug, info, warn};
 /// Zeek DNS log entry (subset of fields we care about)
 #[derive(Debug, Deserialize)]
 struct ZeekDnsLog {
-    #[serde(rename = "ts")]
-    timestamp: f64,
-    #[serde(rename = "id.orig_h")]
-    orig_h: Option<String>,
-    #[serde(rename = "id.resp_h")]
-    resp_h: Option<String>,
     query: Option<String>,
     qtype_name: Option<String>,
-    answers: Option<Vec<String>>,
 }
 
 /// Zeek NTP log entry
 #[derive(Debug, Deserialize)]
 struct ZeekNtpLog {
-    #[serde(rename = "ts")]
-    timestamp: f64,
-    #[serde(rename = "id.orig_h")]
-    orig_h: Option<String>,
     #[serde(rename = "id.resp_h")]
     resp_h: Option<String>,
-    /// NTP reference timestamp
     ref_time: Option<f64>,
-    /// NTP origin timestamp
     org_time: Option<f64>,
 }
 
 /// Zeek SSL/TLS log entry
 #[derive(Debug, Deserialize)]
 struct ZeekSslLog {
-    #[serde(rename = "ts")]
-    timestamp: f64,
-    #[serde(rename = "id.orig_h")]
-    orig_h: Option<String>,
-    #[serde(rename = "id.resp_h")]
-    resp_h: Option<String>,
     server_name: Option<String>,
     not_valid_after: Option<String>,
     validation_status: Option<String>,
@@ -97,7 +78,10 @@ impl ZeekIngestor {
 
             match self.parse_zeek_line(&line) {
                 Ok(Some(event)) => {
-                    tx.send(event).await.ok();
+                    if tx.send(event).await.is_err() {
+                        warn!("Failed to send Zeek event — channel closed");
+                        break;
+                    }
                 }
                 Ok(None) => {
                     debug!("Zeek line parsed but no event generated");
@@ -125,12 +109,10 @@ impl ZeekIngestor {
     fn handle_dns(&self, data: &serde_json::Value) -> Result<Option<IdrEvent>> {
         let log: ZeekDnsLog = serde_json::from_value(data.clone())?;
 
-        // Look for PTR queries (reverse DNS)
         if let Some(qtype) = &log.qtype_name {
             if qtype == "PTR" {
                 if let Some(query) = &log.query {
                     if query.ends_with(".in-addr.arpa") {
-                        // Extract the reversed IP from the PTR query
                         let reversed_octets: Vec<&str> = query
                             .trim_end_matches(".in-addr.arpa")
                             .split('.')
@@ -165,7 +147,7 @@ impl ZeekIngestor {
                                 EventKind::OctetReversalDetected {
                                     forward_ip,
                                     reversed_ip,
-                                    forward_asn: String::new(), // Enriched by correlator
+                                    forward_asn: String::new(),
                                     reversed_asn: String::new(),
                                     ptr_query: query.clone(),
                                 },
@@ -182,12 +164,10 @@ impl ZeekIngestor {
     fn handle_ntp(&self, data: &serde_json::Value) -> Result<Option<IdrEvent>> {
         let log: ZeekNtpLog = serde_json::from_value(data.clone())?;
 
-        // Detect NTP time shift: compare reference time vs origin time
         if let (Some(ref_time), Some(org_time)) = (log.ref_time, log.org_time) {
             let offset = (ref_time - org_time).abs();
 
             if offset > 300.0 {
-                // > 5 minutes
                 let server = log.resp_h.unwrap_or_else(|| "unknown".to_string());
 
                 warn!(
@@ -213,7 +193,6 @@ impl ZeekIngestor {
     fn handle_ssl(&self, data: &serde_json::Value) -> Result<Option<IdrEvent>> {
         let log: ZeekSslLog = serde_json::from_value(data.clone())?;
 
-        // Check for expired certificates being accepted
         if let Some(status) = &log.validation_status {
             if status.contains("expired") || status.contains("not yet valid") {
                 let domain = log
@@ -236,12 +215,68 @@ impl ZeekIngestor {
                     EventKind::HstsTimeManipulation {
                         domain,
                         cert_expiry: expiry,
-                        ntp_shift_seconds: 0.0, // Enriched by NTP correlator
+                        ntp_shift_seconds: 0.0,
                     },
                 )));
             }
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ptr_query() {
+        let ingestor = ZeekIngestor::new("/tmp/test.sock");
+
+        // Simulated Zeek DNS log with a PTR query
+        // PTR for 8.8.8.8 → query is 8.8.8.8.in-addr.arpa
+        let line = r#"{"_path":"dns","query":"8.8.8.8.in-addr.arpa","qtype_name":"PTR"}"#;
+
+        let result = ingestor.parse_zeek_line(line).unwrap();
+        assert!(result.is_some(), "PTR query should produce an event");
+
+        let event = result.unwrap();
+        if let EventKind::OctetReversalDetected {
+            forward_ip,
+            reversed_ip,
+            ptr_query,
+            ..
+        } = &event.kind
+        {
+            // The reversed_ip is the octets as-is from the PTR query: "8.8.8.8"
+            assert_eq!(reversed_ip, "8.8.8.8");
+            // The forward_ip reverses the octets: "8.8.8.8" (symmetric in this case)
+            assert_eq!(forward_ip, "8.8.8.8");
+            assert_eq!(ptr_query, "8.8.8.8.in-addr.arpa");
+        } else {
+            panic!("expected OctetReversalDetected event kind");
+        }
+
+        // Test with an asymmetric PTR query: 46.80.250.142.in-addr.arpa
+        // This represents a PTR lookup for IP 142.250.80.46
+        let line2 = r#"{"_path":"dns","query":"46.80.250.142.in-addr.arpa","qtype_name":"PTR"}"#;
+
+        let result2 = ingestor.parse_zeek_line(line2).unwrap();
+        assert!(result2.is_some());
+
+        let event2 = result2.unwrap();
+        if let EventKind::OctetReversalDetected {
+            forward_ip,
+            reversed_ip,
+            ..
+        } = &event2.kind
+        {
+            // reversed_ip = octets as ordered in the query: 46.80.250.142
+            assert_eq!(reversed_ip, "46.80.250.142");
+            // forward_ip = reversed octets: 142.250.80.46
+            assert_eq!(forward_ip, "142.250.80.46");
+        } else {
+            panic!("expected OctetReversalDetected event kind");
+        }
     }
 }

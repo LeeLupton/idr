@@ -84,7 +84,9 @@ impl NvmeWatchdog {
                             },
                         );
 
-                        tx.send(event).await.ok();
+                        if tx.send(event).await.is_err() {
+                            warn!("Failed to send NVMe anomaly event — channel closed");
+                        }
                     } else {
                         debug!(
                             latency_us = latency_us,
@@ -103,30 +105,17 @@ impl NvmeWatchdog {
     /// Measure I/O latency using direct reads to the NVMe device.
     ///
     /// In production, this uses O_DIRECT + io_uring for bypassing the page cache.
-    /// For development, we use a simplified file read benchmark.
+    /// For development, we use a simplified file metadata probe.
     async fn measure_io_latency(&self) -> Result<u64> {
         let device_path = PathBuf::from(&self.device);
-
-        // Attempt direct I/O read of 4KB block
         let start = Instant::now();
 
-        // Use tokio::fs for async file I/O
-        // In production: use io_uring with O_DIRECT for accurate NVMe-level latency
+        // Probe device existence and measure metadata access latency.
+        // Production: replace with io_uring O_DIRECT 4KB block read.
         match tokio::fs::metadata(&device_path).await {
             Ok(_) => {
-                // Device exists — attempt a small read
-                let buf = vec![0u8; 4096];
-                match tokio::fs::read(&device_path).await {
-                    Ok(_) => {
-                        let elapsed = start.elapsed();
-                        Ok(elapsed.as_micros() as u64)
-                    }
-                    Err(_) => {
-                        // Can't read device directly (permissions) — use fallback
-                        let elapsed = start.elapsed();
-                        Ok(elapsed.as_micros() as u64)
-                    }
-                }
+                let elapsed = start.elapsed();
+                Ok(elapsed.as_micros() as u64)
             }
             Err(_) => {
                 // Device doesn't exist (dev mode) — return synthetic baseline
