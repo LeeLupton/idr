@@ -1,0 +1,36 @@
+[Unit]
+Description=IDR Sentinel Engine — DPRK-001 Intrusion Detection & Response
+Documentation=https://github.com/leelupton/idr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash /opt/idr/harden.sh
+ExecStart=/opt/idr/idr-sentinel
+Environment=IDR_CONFIG=/etc/idr/config.json
+Environment=RUST_LOG=idr_sentinel=info,idr_ebpf=info,idr_network=info,idr_hardware=info
+
+# Security hardening for the service itself
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/run/idr /var/log/idr
+PrivateTmp=true
+
+# Required capabilities for eBPF and network operations
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_SYS_RAWIO
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_SYS_RAWIO
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+WatchdogSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=idr-sentinel
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+{
+  "kernel": {
+    "igmp_correlation_window_ms": 500,
+    "xdp_interface": "eth0",
+    "high_trust_asn_prefixes": [
+      "8.8.8.0/24",
+      "142.250.0.0/15",
+      "172.217.0.0/16",
+      "216.58.0.0/16",
+      "157.240.0.0/16",
+      "31.13.0.0/16",
+      "179.60.192.0/22"
+    ],
+    "suspicious_ttl": 63,
+    "suspicious_rtt_ms": 5.0
+  },
+  "network": {
+    "zeek_socket_path": "/var/run/idr/zeek.sock",
+    "ntp_shift_threshold_secs": 300.0,
+    "tls_flag_count_after_ntp": 10,
+    "residential_asns": [
+      "AS3320",
+      "AS45758",
+      "AS7922",
+      "AS22773"
+    ]
+  },
+  "hardware": {
+    "nvme_device": "/dev/nvme0",
+    "nvme_deviation_threshold_pct": 15.0,
+    "nvme_baseline_latency_us": 100,
+    "gateway_ip": "192.168.1.1",
+    "mac_flap_threshold": 3,
+    "mac_flap_window_secs": 60
+  },
+  "sentinel": {
+    "panic_interface": "eth0",
+    "allow_nvme_erase": false,
+    "auto_panic_enabled": false,
+    "ws_listen_addr": "127.0.0.1:9700"
+  },
+  "dashboard": {
+    "listen_addr": "127.0.0.1:9701"
+  }
+}

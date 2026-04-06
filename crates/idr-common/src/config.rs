@@ -1,0 +1,153 @@
+use serde::{Deserialize, Serialize};
+
+/// Global configuration for the IDR Sentinel Engine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdrConfig {
+    pub kernel: KernelConfig,
+    pub network: NetworkConfig,
+    pub hardware: HardwareConfig,
+    pub sentinel: SentinelConfig,
+    pub dashboard: DashboardConfig,
+}
+
+impl Default for IdrConfig {
+    fn default() -> Self {
+        Self {
+            kernel: KernelConfig::default(),
+            network: NetworkConfig::default(),
+            hardware: HardwareConfig::default(),
+            sentinel: SentinelConfig::default(),
+            dashboard: DashboardConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KernelConfig {
+    /// IGMP → QUIC correlation window in milliseconds
+    pub igmp_correlation_window_ms: u64,
+    /// Interface to attach XDP program to
+    pub xdp_interface: String,
+    /// High-trust IP prefixes (Google, Meta, etc.)
+    pub high_trust_asn_prefixes: Vec<String>,
+    /// TTL threshold for physics anomaly detection
+    pub suspicious_ttl: u8,
+    /// RTT threshold (ms) for physics anomaly detection
+    pub suspicious_rtt_ms: f64,
+}
+
+impl Default for KernelConfig {
+    fn default() -> Self {
+        Self {
+            igmp_correlation_window_ms: 500,
+            xdp_interface: "eth0".to_string(),
+            high_trust_asn_prefixes: vec![
+                // Google
+                "8.8.8.0/24".into(),
+                "142.250.0.0/15".into(),
+                "172.217.0.0/16".into(),
+                "216.58.0.0/16".into(),
+                // Meta/Facebook
+                "157.240.0.0/16".into(),
+                "31.13.0.0/16".into(),
+                "179.60.192.0/22".into(),
+            ],
+            suspicious_ttl: 63,
+            suspicious_rtt_ms: 5.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    /// Path to Zeek Unix socket for JSON log ingestion
+    pub zeek_socket_path: String,
+    /// NTP time-shift threshold in seconds
+    pub ntp_shift_threshold_secs: f64,
+    /// Number of TLS handshakes to flag after NTP time-shift
+    pub tls_flag_count_after_ntp: usize,
+    /// Residential ISP ASNs for octet reversal detection
+    pub residential_asns: Vec<String>,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            zeek_socket_path: "/var/run/idr/zeek.sock".to_string(),
+            ntp_shift_threshold_secs: 300.0,
+            tls_flag_count_after_ntp: 10,
+            residential_asns: vec![
+                "AS3320".into(),  // Deutsche Telekom
+                "AS45758".into(), // Triple T Broadband (3BB)
+                "AS7922".into(),  // Comcast
+                "AS22773".into(), // Cox
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardwareConfig {
+    /// NVMe device to monitor
+    pub nvme_device: String,
+    /// I/O latency deviation threshold (percentage)
+    pub nvme_deviation_threshold_pct: f64,
+    /// Baseline I/O latency in microseconds (manufacturer spec)
+    pub nvme_baseline_latency_us: u64,
+    /// Gateway IP for ARP/MAC monitoring
+    pub gateway_ip: String,
+    /// MAC flap threshold (changes per window)
+    pub mac_flap_threshold: u32,
+    /// MAC flap detection window in seconds
+    pub mac_flap_window_secs: u64,
+}
+
+impl Default for HardwareConfig {
+    fn default() -> Self {
+        Self {
+            nvme_device: "/dev/nvme0".to_string(),
+            nvme_deviation_threshold_pct: 15.0,
+            nvme_baseline_latency_us: 100,
+            gateway_ip: "192.168.1.1".to_string(),
+            mac_flap_threshold: 3,
+            mac_flap_window_secs: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentinelConfig {
+    /// Network interface to kill on panic
+    pub panic_interface: String,
+    /// Allow NVMe crypto-erase on panic (DESTRUCTIVE)
+    pub allow_nvme_erase: bool,
+    /// Enable automatic panic response
+    pub auto_panic_enabled: bool,
+    /// WebSocket listen address for dashboard
+    pub ws_listen_addr: String,
+}
+
+impl Default for SentinelConfig {
+    fn default() -> Self {
+        Self {
+            panic_interface: "eth0".to_string(),
+            allow_nvme_erase: false,
+            auto_panic_enabled: false,
+            ws_listen_addr: "127.0.0.1:9700".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardConfig {
+    /// HTTP listen address for the dashboard API
+    pub listen_addr: String,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: "127.0.0.1:9701".to_string(),
+        }
+    }
+}

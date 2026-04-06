@@ -1,0 +1,27 @@
+[package]
+name = "idr-sentinel"
+description = "Sentinel Engine: cross-validation correlation, alerting, and panic response"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "idr-sentinel"
+path = "src/main.rs"
+
+[dependencies]
+idr-common = { path = "../idr-common" }
+idr-ebpf = { path = "../idr-ebpf" }
+idr-network = { path = "../idr-network" }
+idr-hardware = { path = "../idr-hardware" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+dashmap = "6"
