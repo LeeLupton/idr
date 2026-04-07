@@ -10,6 +10,9 @@ use idr_common::events::{EventKind, EventSource, IdrEvent, Severity};
 use std::collections::VecDeque;
 use tracing::warn;
 
+/// Maximum concurrent NTP shift windows tracked (prevents flood DoS)
+const MAX_SHIFT_WINDOWS: usize = 100;
+
 struct NtpShiftWindow {
     offset_seconds: f64,
     ntp_server: String,
@@ -50,6 +53,10 @@ impl NtpMonitor {
                         self.flag_count
                     );
 
+                    // Evict oldest window if at capacity
+                    if self.active_shifts.len() >= MAX_SHIFT_WINDOWS {
+                        self.active_shifts.pop_front();
+                    }
                     self.active_shifts.push_back(NtpShiftWindow {
                         offset_seconds: *offset_seconds,
                         ntp_server: ntp_server.clone(),

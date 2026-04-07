@@ -118,7 +118,11 @@ impl ZeekIngestor {
                             .split('.')
                             .collect();
 
-                        if reversed_octets.len() == 4 {
+                        // Validate each octet is a valid u8 (0-255) to reject malformed PTR queries
+                        let valid_octets = reversed_octets.len() == 4
+                            && reversed_octets.iter().all(|o| o.parse::<u8>().is_ok());
+
+                        if valid_octets {
                             let reversed_ip = format!(
                                 "{}.{}.{}.{}",
                                 reversed_octets[0],

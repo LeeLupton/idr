@@ -9,17 +9,20 @@
 use anyhow::Result;
 use idr_common::config::HardwareConfig;
 use idr_common::events::{EventKind, EventSource, IdrEvent, Severity};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+const MAX_SAMPLES: usize = 100;
+
 pub struct NvmeWatchdog {
     device: String,
     baseline_us: u64,
     deviation_threshold_pct: f64,
-    /// Rolling window of recent latency samples
-    recent_samples: Vec<u64>,
+    /// Rolling window of recent latency samples (O(1) push/pop)
+    recent_samples: VecDeque<u64>,
     /// Whether network exfiltration is currently suspected
     exfil_suspected: bool,
 }
@@ -30,7 +33,7 @@ impl NvmeWatchdog {
             device: config.nvme_device.clone(),
             baseline_us: config.nvme_baseline_latency_us,
             deviation_threshold_pct: config.nvme_deviation_threshold_pct,
-            recent_samples: Vec::with_capacity(100),
+            recent_samples: VecDeque::with_capacity(MAX_SAMPLES),
             exfil_suspected: false,
         }
     }
@@ -51,9 +54,9 @@ impl NvmeWatchdog {
 
             match self.measure_io_latency().await {
                 Ok(latency_us) => {
-                    self.recent_samples.push(latency_us);
-                    if self.recent_samples.len() > 100 {
-                        self.recent_samples.remove(0);
+                    self.recent_samples.push_back(latency_us);
+                    if self.recent_samples.len() > MAX_SAMPLES {
+                        self.recent_samples.pop_front();
                     }
 
                     let deviation_pct = self.calculate_deviation(latency_us);

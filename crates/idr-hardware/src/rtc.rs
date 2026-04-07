@@ -102,8 +102,8 @@ impl RtcWatchdog {
             }
         }
 
-        // Method 2: hwclock command (fallback)
-        if let Ok(output) = tokio::process::Command::new("hwclock")
+        // Method 2: hwclock command (fallback) — use absolute path to prevent PATH manipulation
+        if let Ok(output) = tokio::process::Command::new("/usr/sbin/hwclock")
             .args(["--get", "--utc"])
             .output()
             .await
@@ -120,8 +120,13 @@ impl RtcWatchdog {
 }
 
 fn format_unix_time(epoch_secs: f64) -> String {
+    if epoch_secs.is_nan() || epoch_secs.is_infinite() {
+        return format!("{:.3}", epoch_secs);
+    }
     let secs = epoch_secs as i64;
-    let nanos = ((epoch_secs - secs as f64) * 1_000_000_000.0) as u32;
+    let frac = (epoch_secs - secs as f64).abs();
+    // Clamp nanos to valid range [0, 999_999_999] to prevent overflow
+    let nanos = (frac * 1_000_000_000.0).min(999_999_999.0) as u32;
     chrono::DateTime::from_timestamp(secs, nanos)
         .map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339())
         .unwrap_or_else(|| format!("{:.3}", epoch_secs))

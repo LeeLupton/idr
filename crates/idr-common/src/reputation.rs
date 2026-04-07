@@ -67,6 +67,9 @@ impl ReputationDb {
     }
 
     pub fn add_prefix(&mut self, ip: &str, prefix_len: u8, asn: &str) {
+        if prefix_len > 32 {
+            return; // Invalid CIDR prefix length for IPv4
+        }
         if let Ok(addr) = ip.parse::<Ipv4Addr>() {
             self.prefix_to_asn
                 .push((addr, prefix_len, asn.to_string()));
@@ -79,6 +82,9 @@ impl ReputationDb {
         let mut best_match: Option<(&str, u8)> = None;
 
         for (prefix_ip, prefix_len, asn) in &self.prefix_to_asn {
+            if *prefix_len > 32 {
+                continue; // Skip invalid entries
+            }
             let prefix_bits = u32::from(*prefix_ip);
             let mask = if *prefix_len == 0 {
                 0

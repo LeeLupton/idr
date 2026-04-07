@@ -15,6 +15,9 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use tracing::{debug, warn};
 
+/// Maximum cached PID entries (prevents memory exhaustion on high-churn systems)
+const MAX_CACHE_ENTRIES: usize = 50_000;
+
 /// Cache of PID → binary hash to avoid re-hashing on every socket event
 struct BinaryCache {
     entries: HashMap<u32, CacheEntry>,
@@ -34,8 +37,29 @@ impl BinaryCache {
     }
 
     fn get_or_compute(&mut self, pid: u32) -> Option<&CacheEntry> {
+        // Defend against PID reuse (TOCTOU): if cached, verify exe_path still matches
+        if let Some(existing) = self.entries.get(&pid) {
+            let exe_link = format!("/proc/{}/exe", pid);
+            if let Ok(current_path) = std::fs::read_link(&exe_link) {
+                if current_path != existing.exe_path {
+                    // PID was recycled — invalidate stale entry
+                    self.entries.remove(&pid);
+                }
+            }
+        }
+
         if !self.entries.contains_key(&pid) {
             if let Some(entry) = Self::compute(pid) {
+                // Enforce capacity limit
+                if self.entries.len() >= MAX_CACHE_ENTRIES {
+                    self.prune();
+                    // If still over after prune, drop an arbitrary entry
+                    if self.entries.len() >= MAX_CACHE_ENTRIES {
+                        if let Some(key) = self.entries.keys().next().copied() {
+                            self.entries.remove(&key);
+                        }
+                    }
+                }
                 self.entries.insert(pid, entry);
             }
         }
@@ -46,6 +70,25 @@ impl BinaryCache {
         // Read the real exe path via /proc
         let exe_link = format!("/proc/{}/exe", pid);
         let exe_path = std::fs::read_link(&exe_link).ok()?;
+
+        // Safety: only hash files that look like real executables, not arbitrary paths.
+        // Skip deleted binaries (kernel appends " (deleted)").
+        let path_str = exe_path.to_string_lossy();
+        if path_str.contains(" (deleted)") {
+            return None;
+        }
+
+        // Only hash files, not directories or special files
+        let metadata = std::fs::metadata(&exe_path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+
+        // Cap file size to prevent hashing multi-GB binaries (256 MB limit)
+        if metadata.len() > 256 * 1024 * 1024 {
+            warn!(path = %path_str, "Binary too large to hash, skipping");
+            return None;
+        }
 
         // Compute SHA-256 of the binary
         let binary_data = std::fs::read(&exe_path).ok()?;

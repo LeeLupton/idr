@@ -23,6 +23,13 @@ use uuid::Uuid;
 
 use crate::panic_response::PanicResponder;
 
+/// Maximum number of concurrent kill chain tracks (prevents memory exhaustion from IP spoofing)
+const MAX_KILL_CHAINS: usize = 10_000;
+/// Kill chain entries older than this are evicted
+const KILL_CHAIN_TTL_SECS: u64 = 3600; // 1 hour
+/// Maximum stored alerts before oldest are dropped
+const MAX_ALERTS: usize = 10_000;
+
 /// Active kill chain tracking for a suspected campaign
 struct KillChainTracker {
     stages_seen: Vec<(KillChainStage, Uuid)>,
@@ -50,6 +57,10 @@ impl KillChainTracker {
 
     fn event_ids(&self) -> Vec<Uuid> {
         self.stages_seen.iter().map(|(_, id)| *id).collect()
+    }
+
+    fn is_expired(&self) -> bool {
+        self.last_updated.elapsed().as_secs() > KILL_CHAIN_TTL_SECS
     }
 }
 
@@ -120,9 +131,10 @@ impl SentinelCorrelator {
                 self.check_panic_condition(&dashboard_tx).await;
             }
 
-            // Periodically prune lineage cache (every 10 minutes)
+            // Periodically prune caches (every 10 minutes)
             if self.last_cache_prune.elapsed().as_secs() > 600 {
                 self.lineage_tracker.prune_cache();
+                self.prune_stale_kill_chains();
                 self.last_cache_prune = Instant::now();
             }
         }
@@ -172,7 +184,7 @@ impl SentinelCorrelator {
                         format!("DNS PTR octet reversal detected: {:?}", enriched.kind),
                         vec![event.id, enriched.id],
                     );
-                    self.alerts.push(alert);
+                    self.push_alert(alert);
                     derived.push(enriched);
                 } else {
                     // PTR query didn't match evasion pattern — track anyway
@@ -194,7 +206,7 @@ impl SentinelCorrelator {
                         "Expired TLS certificate accepted during NTP time-shift window".to_string(),
                         vec![event.id, enriched.id],
                     );
-                    self.alerts.push(alert);
+                    self.push_alert(alert);
                     derived.push(enriched);
                 } else {
                     let alert = Alert::critical(
@@ -202,7 +214,7 @@ impl SentinelCorrelator {
                         "Expired TLS certificate accepted".to_string(),
                         vec![event.id],
                     );
-                    self.alerts.push(alert);
+                    self.push_alert(alert);
                 }
             }
 
@@ -240,8 +252,36 @@ impl SentinelCorrelator {
         derived
     }
 
+    /// Evict expired kill chain entries and enforce size cap
+    fn prune_stale_kill_chains(&mut self) {
+        self.kill_chains.retain(|_, tracker| !tracker.is_expired());
+        // If still over capacity, drop the oldest entries
+        if self.kill_chains.len() > MAX_KILL_CHAINS {
+            let mut entries: Vec<_> = self.kill_chains.drain().collect();
+            entries.sort_by_key(|(_, t)| std::cmp::Reverse(t.last_updated));
+            entries.truncate(MAX_KILL_CHAINS);
+            self.kill_chains = entries.into_iter().collect();
+        }
+    }
+
+    /// Push an alert, dropping oldest if over capacity
+    fn push_alert(&mut self, alert: Alert) {
+        if self.alerts.len() >= MAX_ALERTS {
+            // Drop oldest 10% to amortize the cost
+            let drain_count = MAX_ALERTS / 10;
+            self.alerts.drain(..drain_count);
+        }
+        self.alerts.push(alert);
+    }
+
     fn advance_kill_chain(&mut self, event: &IdrEvent, stage: KillChainStage) {
-        let src_ip = extract_source_ip(&event.kind).unwrap_or_else(|| "unknown".to_string());
+        let src_ip = match extract_source_ip(&event.kind) {
+            Some(ip) => ip,
+            None => {
+                warn!("Cannot extract source IP for kill chain tracking, skipping");
+                return;
+            }
+        };
 
         let tracker = self
             .kill_chains
@@ -329,14 +369,21 @@ impl SentinelCorrelator {
             let _ = dashboard_tx.send(panic_event);
 
             if self.config.sentinel.auto_panic_enabled {
-                self.panic_responder.execute().await;
+                let success = self.panic_responder.execute().await;
+                if success {
+                    // Only reset flags if panic response succeeded
+                    self.physics_anomaly_active = false;
+                    self.firmware_anomaly_active = false;
+                } else {
+                    // Panic failed — keep flags so we retry on next event cycle
+                    error!("Panic response failed — will retry on next event");
+                }
             } else {
                 warn!("Auto-panic disabled — manual intervention required");
+                // Reset flags to avoid log spam, but alert remains
+                self.physics_anomaly_active = false;
+                self.firmware_anomaly_active = false;
             }
-
-            // Reset flags to avoid repeated firing
-            self.physics_anomaly_active = false;
-            self.firmware_anomaly_active = false;
         }
     }
 }

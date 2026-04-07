@@ -12,6 +12,11 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use tracing::warn;
 
+/// Maximum unique destination IPs tracked (prevents memory exhaustion)
+const MAX_OBSERVATIONS: usize = 10_000;
+/// Maximum RTT/TTL samples kept per destination
+const MAX_SAMPLES_PER_IP: usize = 100;
+
 /// Baseline RTT expectations for different geographic regions
 struct RttBaseline {
     /// Minimum physically plausible RTT for global IPs (ms)
@@ -66,6 +71,13 @@ impl PhysicsMonitor {
             return None;
         }
 
+        // Evict oldest entry if at capacity (LRU-style: just drop an arbitrary entry)
+        if self.observations.len() >= MAX_OBSERVATIONS && !self.observations.contains_key(&dst_ip) {
+            if let Some(key) = self.observations.keys().next().copied() {
+                self.observations.remove(&key);
+            }
+        }
+
         let stats = self
             .observations
             .entry(dst_ip)
@@ -75,7 +87,13 @@ impl PhysicsMonitor {
                 anomaly_count: 0,
             });
 
+        if stats.rtt_samples.len() >= MAX_SAMPLES_PER_IP {
+            stats.rtt_samples.remove(0);
+        }
         stats.rtt_samples.push(rtt_ms);
+        if stats.ttl_values.len() >= MAX_SAMPLES_PER_IP {
+            stats.ttl_values.remove(0);
+        }
         stats.ttl_values.push(observed_ttl);
 
         let mut reasons = Vec::new();
