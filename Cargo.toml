@@ -6,6 +6,7 @@ members = [
     "crates/idr-sentinel",
     "crates/idr-network",
     "crates/idr-hardware",
+    "crates/idr-sim",
 ]
 
 [workspace.package]

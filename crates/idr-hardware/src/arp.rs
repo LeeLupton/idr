@@ -13,8 +13,6 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 struct MacChange {
-    old_mac: String,
-    new_mac: String,
     timestamp: Instant,
 }
 
@@ -63,8 +61,6 @@ impl ArpMonitor {
                         let old_mac = self.last_known_mac.clone().unwrap_or_default();
 
                         let change = MacChange {
-                            old_mac: old_mac.clone(),
-                            new_mac: current_mac.clone(),
                             timestamp: Instant::now(),
                         };
 
@@ -93,7 +89,9 @@ impl ArpMonitor {
                                 },
                             );
 
-                            tx.send(event).await.ok();
+                            if tx.send(event).await.is_err() {
+                                warn!("Failed to send MAC flapping event — channel closed");
+                            }
                         }
                     }
                     self.last_known_mac = Some(current_mac);

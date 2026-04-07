@@ -12,6 +12,11 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use tracing::warn;
 
+/// Maximum unique destination IPs tracked (prevents memory exhaustion)
+const MAX_OBSERVATIONS: usize = 10_000;
+/// Maximum RTT/TTL samples kept per destination
+const MAX_SAMPLES_PER_IP: usize = 100;
+
 /// Baseline RTT expectations for different geographic regions
 struct RttBaseline {
     /// Minimum physically plausible RTT for global IPs (ms)
@@ -22,7 +27,6 @@ struct RttBaseline {
 
 /// Tracks ongoing physics observations per destination IP
 pub struct PhysicsMonitor {
-    config: KernelConfig,
     reputation: ReputationDb,
     baseline: RttBaseline,
     /// Rolling statistics per destination
@@ -38,7 +42,6 @@ struct PhysicsStats {
 impl PhysicsMonitor {
     pub fn new(config: &KernelConfig, reputation: ReputationDb) -> Self {
         Self {
-            config: config.clone(),
             reputation,
             baseline: RttBaseline {
                 min_global_rtt_ms: config.suspicious_rtt_ms,
@@ -68,6 +71,13 @@ impl PhysicsMonitor {
             return None;
         }
 
+        // Evict oldest entry if at capacity (LRU-style: just drop an arbitrary entry)
+        if self.observations.len() >= MAX_OBSERVATIONS && !self.observations.contains_key(&dst_ip) {
+            if let Some(key) = self.observations.keys().next().copied() {
+                self.observations.remove(&key);
+            }
+        }
+
         let stats = self
             .observations
             .entry(dst_ip)
@@ -77,7 +87,13 @@ impl PhysicsMonitor {
                 anomaly_count: 0,
             });
 
+        if stats.rtt_samples.len() >= MAX_SAMPLES_PER_IP {
+            stats.rtt_samples.remove(0);
+        }
         stats.rtt_samples.push(rtt_ms);
+        if stats.ttl_values.len() >= MAX_SAMPLES_PER_IP {
+            stats.ttl_values.remove(0);
+        }
         stats.ttl_values.push(observed_ttl);
 
         let mut reasons = Vec::new();
@@ -132,5 +148,81 @@ impl PhysicsMonitor {
             .get(ip)
             .map(|s| s.anomaly_count)
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use idr_common::config::KernelConfig;
+    use idr_common::events::{EventKind, EventSource, IdrEvent, Severity};
+    use idr_common::reputation::ReputationDb;
+
+    fn make_physics_event(dst_ip: &str, ttl: u8, rtt_ms: f64) -> IdrEvent {
+        IdrEvent::new(
+            EventSource::KernelEbpf,
+            Severity::High,
+            EventKind::PhysicsAnomaly {
+                dst_ip: dst_ip.to_string(),
+                expected_ttl_range: (48, 58),
+                observed_ttl: ttl,
+                rtt_ms,
+                reason: String::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_physics_anomaly_high_trust_ttl() {
+        let config = KernelConfig::default();
+        let reputation = ReputationDb::new();
+        let mut monitor = PhysicsMonitor::new(&config, reputation);
+
+        // TTL=63 to a Google IP should trigger alert
+        let event = make_physics_event("8.8.8.8", 63, 30.0);
+        let result = monitor.process(&event);
+        assert!(result.is_some(), "TTL=63 to Google should trigger alert");
+
+        let alert = result.unwrap();
+        assert_eq!(alert.severity, Severity::Critical);
+        if let EventKind::PhysicsAnomaly { reason, .. } = &alert.kind {
+            assert!(reason.contains("TTL=63"), "reason should mention TTL=63");
+        } else {
+            panic!("expected PhysicsAnomaly event kind");
+        }
+    }
+
+    #[test]
+    fn test_physics_no_alert_unknown_ip() {
+        let config = KernelConfig::default();
+        let reputation = ReputationDb::new();
+        let mut monitor = PhysicsMonitor::new(&config, reputation);
+
+        // TTL=63 to an unknown IP should NOT trigger (only high-trust)
+        let event = make_physics_event("93.184.216.34", 63, 30.0);
+        let result = monitor.process(&event);
+        assert!(result.is_none(), "TTL=63 to unknown IP should not trigger");
+    }
+
+    #[test]
+    fn test_physics_low_rtt() {
+        let config = KernelConfig::default();
+        let reputation = ReputationDb::new();
+        let mut monitor = PhysicsMonitor::new(&config, reputation);
+
+        // RTT < 5ms to Google should trigger alert
+        let event = make_physics_event("8.8.8.8", 50, 2.0);
+        let result = monitor.process(&event);
+        assert!(result.is_some(), "RTT<5ms to Google should trigger alert");
+
+        let alert = result.unwrap();
+        if let EventKind::PhysicsAnomaly { reason, .. } = &alert.kind {
+            assert!(
+                reason.contains("RTT="),
+                "reason should mention RTT anomaly"
+            );
+        } else {
+            panic!("expected PhysicsAnomaly event kind");
+        }
     }
 }

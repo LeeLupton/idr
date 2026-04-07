@@ -7,11 +7,12 @@
 use idr_common::events::{EventKind, EventSource, IdrEvent, Severity};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 const CORRELATION_WINDOW: Duration = Duration::from_millis(500);
+/// Maximum IGMP triggers held in the correlation window (prevents flood DoS)
+const MAX_ACTIVE_TRIGGERS: usize = 1_000;
 
 struct IgmpTrigger {
     event_id: Uuid,
@@ -58,6 +59,10 @@ impl IgmpCorrelator {
                     event_id: event.id,
                     timestamp: now,
                 });
+                // Enforce capacity limit against flood attacks
+                while self.active_triggers.len() > MAX_ACTIVE_TRIGGERS {
+                    self.active_triggers.pop_front();
+                }
                 None
             }
             EventKind::QuicHeartbeat {

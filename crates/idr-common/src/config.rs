@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 /// Global configuration for the IDR Sentinel Engine
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,6 +10,87 @@ pub struct IdrConfig {
     pub sentinel: SentinelConfig,
     pub dashboard: DashboardConfig,
 }
+
+impl IdrConfig {
+    /// Validate all configuration values. Call after deserialization from untrusted input.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // Kernel
+        if self.kernel.igmp_correlation_window_ms == 0 {
+            return Err(ConfigError("igmp_correlation_window_ms must be > 0".into()));
+        }
+        if self.kernel.suspicious_rtt_ms <= 0.0 {
+            return Err(ConfigError("suspicious_rtt_ms must be > 0".into()));
+        }
+
+        // Network
+        if self.network.ntp_shift_threshold_secs <= 0.0 {
+            return Err(ConfigError("ntp_shift_threshold_secs must be > 0".into()));
+        }
+        if self.network.tls_flag_count_after_ntp == 0 {
+            return Err(ConfigError("tls_flag_count_after_ntp must be > 0".into()));
+        }
+        if self.network.zeek_socket_path.contains("..") {
+            return Err(ConfigError("zeek_socket_path must not contain '..'".into()));
+        }
+
+        // Hardware
+        if self.hardware.nvme_baseline_latency_us == 0 {
+            return Err(ConfigError("nvme_baseline_latency_us must be > 0".into()));
+        }
+        if self.hardware.nvme_deviation_threshold_pct <= 0.0 {
+            return Err(ConfigError("nvme_deviation_threshold_pct must be > 0".into()));
+        }
+        if self.hardware.mac_flap_threshold == 0 {
+            return Err(ConfigError("mac_flap_threshold must be > 0".into()));
+        }
+        if self.hardware.mac_flap_window_secs == 0 {
+            return Err(ConfigError("mac_flap_window_secs must be > 0".into()));
+        }
+
+        // Sentinel — validate interface name (alphanumeric, dashes, dots, colons)
+        if !is_valid_interface_name(&self.sentinel.panic_interface) {
+            return Err(ConfigError(format!(
+                "panic_interface '{}' contains invalid characters (allowed: alphanumeric, dash, dot, colon)",
+                self.sentinel.panic_interface
+            )));
+        }
+        self.sentinel.ws_listen_addr.parse::<SocketAddr>().map_err(|_| {
+            ConfigError(format!("invalid ws_listen_addr: '{}'", self.sentinel.ws_listen_addr))
+        })?;
+
+        // Dashboard
+        self.dashboard.listen_addr.parse::<SocketAddr>().map_err(|_| {
+            ConfigError(format!("invalid dashboard listen_addr: '{}'", self.dashboard.listen_addr))
+        })?;
+
+        Ok(())
+    }
+}
+
+/// Validate that a network interface name contains only safe characters
+fn is_valid_interface_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 15 // IFNAMSIZ - 1
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == ':' || c == '_')
+}
+
+/// Validate that an NVMe device path looks like a real device path
+pub fn is_valid_device_path(path: &str) -> bool {
+    path.starts_with("/dev/")
+        && !path.contains("..")
+        && path.chars().all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '-' || c == '_')
+}
+
+#[derive(Debug)]
+pub struct ConfigError(pub String);
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "config validation error: {}", self.0)
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 impl Default for IdrConfig {
     fn default() -> Self {
@@ -149,5 +231,130 @@ impl Default for DashboardConfig {
         Self {
             listen_addr: "127.0.0.1:9701".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config_valid() {
+        let config = IdrConfig::default();
+
+        // Kernel config defaults
+        assert_eq!(config.kernel.igmp_correlation_window_ms, 500);
+        assert_eq!(config.kernel.xdp_interface, "eth0");
+        assert!(!config.kernel.high_trust_asn_prefixes.is_empty());
+        assert_eq!(config.kernel.suspicious_ttl, 63);
+        assert!(config.kernel.suspicious_rtt_ms > 0.0);
+
+        // Network config defaults
+        assert!(!config.network.zeek_socket_path.is_empty());
+        assert_eq!(config.network.ntp_shift_threshold_secs, 300.0);
+        assert_eq!(config.network.tls_flag_count_after_ntp, 10);
+        assert!(!config.network.residential_asns.is_empty());
+
+        // Hardware config defaults
+        assert!(!config.hardware.nvme_device.is_empty());
+        assert!(config.hardware.nvme_deviation_threshold_pct > 0.0);
+
+        // Sentinel config defaults
+        assert!(!config.sentinel.auto_panic_enabled);
+        assert!(!config.sentinel.allow_nvme_erase);
+        assert!(!config.sentinel.ws_listen_addr.is_empty());
+
+        // Dashboard config defaults
+        assert!(!config.dashboard.listen_addr.is_empty());
+    }
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = IdrConfig::default();
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&config).expect("serialization failed");
+
+        // Deserialize back
+        let deserialized: IdrConfig =
+            serde_json::from_str(&json).expect("deserialization failed");
+
+        // Verify key fields match (no PartialEq derive, so check field by field)
+        assert_eq!(
+            deserialized.kernel.igmp_correlation_window_ms,
+            config.kernel.igmp_correlation_window_ms
+        );
+        assert_eq!(
+            deserialized.kernel.xdp_interface,
+            config.kernel.xdp_interface
+        );
+        assert_eq!(
+            deserialized.kernel.suspicious_ttl,
+            config.kernel.suspicious_ttl
+        );
+        assert_eq!(
+            deserialized.network.ntp_shift_threshold_secs,
+            config.network.ntp_shift_threshold_secs
+        );
+        assert_eq!(
+            deserialized.network.tls_flag_count_after_ntp,
+            config.network.tls_flag_count_after_ntp
+        );
+        assert_eq!(
+            deserialized.sentinel.auto_panic_enabled,
+            config.sentinel.auto_panic_enabled
+        );
+        assert_eq!(
+            deserialized.sentinel.allow_nvme_erase,
+            config.sentinel.allow_nvme_erase
+        );
+        assert_eq!(
+            deserialized.dashboard.listen_addr,
+            config.dashboard.listen_addr
+        );
+        assert_eq!(
+            deserialized.hardware.nvme_device,
+            config.hardware.nvme_device
+        );
+
+        // Also verify re-serialization produces the same JSON
+        let json2 = serde_json::to_string(&deserialized).expect("re-serialization failed");
+        assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn test_default_config_passes_validation() {
+        let config = IdrConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_zero_correlation_window() {
+        let mut config = IdrConfig::default();
+        config.kernel.igmp_correlation_window_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_interface() {
+        let mut config = IdrConfig::default();
+        config.sentinel.panic_interface = "; rm -rf /".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_listen_addr() {
+        let mut config = IdrConfig::default();
+        config.sentinel.ws_listen_addr = "not-a-socket-addr".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_device_path() {
+        assert!(is_valid_device_path("/dev/nvme0n1"));
+        assert!(is_valid_device_path("/dev/sda"));
+        assert!(!is_valid_device_path("../etc/passwd"));
+        assert!(!is_valid_device_path("/dev/../etc/passwd"));
+        assert!(!is_valid_device_path("/tmp/evil"));
     }
 }

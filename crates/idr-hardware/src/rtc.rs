@@ -17,8 +17,6 @@ use tracing::{debug, info, warn};
 const MAX_DRIFT_SECS: f64 = 30.0;
 
 pub struct RtcWatchdog {
-    /// Path to the RTC device
-    rtc_path: String,
     /// Last known RTC time
     last_rtc_time: Option<f64>,
     /// Whether a divergence alert has been sent
@@ -28,7 +26,6 @@ pub struct RtcWatchdog {
 impl RtcWatchdog {
     pub fn new() -> Self {
         Self {
-            rtc_path: "/dev/rtc0".to_string(),
             last_rtc_time: None,
             divergence_alerted: false,
         }
@@ -68,7 +65,9 @@ impl RtcWatchdog {
                             },
                         );
 
-                        tx.send(event).await.ok();
+                        if tx.send(event).await.is_err() {
+                            warn!("Failed to send RTC divergence event — channel closed");
+                        }
                         self.divergence_alerted = true;
                     }
                 } else {
@@ -103,16 +102,14 @@ impl RtcWatchdog {
             }
         }
 
-        // Method 2: hwclock command (fallback)
-        if let Ok(output) = tokio::process::Command::new("hwclock")
+        // Method 2: hwclock command (fallback) — use absolute path to prevent PATH manipulation
+        if let Ok(output) = tokio::process::Command::new("/usr/sbin/hwclock")
             .args(["--get", "--utc"])
             .output()
             .await
         {
             if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // Parse hwclock output — format varies by version
-                // Just use the current system time as a rough fallback
+                // hwclock output format varies by version; use system time as fallback
                 return Some(self.get_system_time());
             }
         }
@@ -123,8 +120,13 @@ impl RtcWatchdog {
 }
 
 fn format_unix_time(epoch_secs: f64) -> String {
+    if epoch_secs.is_nan() || epoch_secs.is_infinite() {
+        return format!("{:.3}", epoch_secs);
+    }
     let secs = epoch_secs as i64;
-    let nanos = ((epoch_secs - secs as f64) * 1_000_000_000.0) as u32;
+    let frac = (epoch_secs - secs as f64).abs();
+    // Clamp nanos to valid range [0, 999_999_999] to prevent overflow
+    let nanos = (frac * 1_000_000_000.0).min(999_999_999.0) as u32;
     chrono::DateTime::from_timestamp(secs, nanos)
         .map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339())
         .unwrap_or_else(|| format!("{:.3}", epoch_secs))

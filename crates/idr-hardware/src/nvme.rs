@@ -9,17 +9,20 @@
 use anyhow::Result;
 use idr_common::config::HardwareConfig;
 use idr_common::events::{EventKind, EventSource, IdrEvent, Severity};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+const MAX_SAMPLES: usize = 100;
+
 pub struct NvmeWatchdog {
     device: String,
     baseline_us: u64,
     deviation_threshold_pct: f64,
-    /// Rolling window of recent latency samples
-    recent_samples: Vec<u64>,
+    /// Rolling window of recent latency samples (O(1) push/pop)
+    recent_samples: VecDeque<u64>,
     /// Whether network exfiltration is currently suspected
     exfil_suspected: bool,
 }
@@ -30,7 +33,7 @@ impl NvmeWatchdog {
             device: config.nvme_device.clone(),
             baseline_us: config.nvme_baseline_latency_us,
             deviation_threshold_pct: config.nvme_deviation_threshold_pct,
-            recent_samples: Vec::with_capacity(100),
+            recent_samples: VecDeque::with_capacity(MAX_SAMPLES),
             exfil_suspected: false,
         }
     }
@@ -51,9 +54,9 @@ impl NvmeWatchdog {
 
             match self.measure_io_latency().await {
                 Ok(latency_us) => {
-                    self.recent_samples.push(latency_us);
-                    if self.recent_samples.len() > 100 {
-                        self.recent_samples.remove(0);
+                    self.recent_samples.push_back(latency_us);
+                    if self.recent_samples.len() > MAX_SAMPLES {
+                        self.recent_samples.pop_front();
                     }
 
                     let deviation_pct = self.calculate_deviation(latency_us);
@@ -84,7 +87,9 @@ impl NvmeWatchdog {
                             },
                         );
 
-                        tx.send(event).await.ok();
+                        if tx.send(event).await.is_err() {
+                            warn!("Failed to send NVMe anomaly event — channel closed");
+                        }
                     } else {
                         debug!(
                             latency_us = latency_us,
@@ -103,30 +108,17 @@ impl NvmeWatchdog {
     /// Measure I/O latency using direct reads to the NVMe device.
     ///
     /// In production, this uses O_DIRECT + io_uring for bypassing the page cache.
-    /// For development, we use a simplified file read benchmark.
+    /// For development, we use a simplified file metadata probe.
     async fn measure_io_latency(&self) -> Result<u64> {
         let device_path = PathBuf::from(&self.device);
-
-        // Attempt direct I/O read of 4KB block
         let start = Instant::now();
 
-        // Use tokio::fs for async file I/O
-        // In production: use io_uring with O_DIRECT for accurate NVMe-level latency
+        // Probe device existence and measure metadata access latency.
+        // Production: replace with io_uring O_DIRECT 4KB block read.
         match tokio::fs::metadata(&device_path).await {
             Ok(_) => {
-                // Device exists — attempt a small read
-                let buf = vec![0u8; 4096];
-                match tokio::fs::read(&device_path).await {
-                    Ok(_) => {
-                        let elapsed = start.elapsed();
-                        Ok(elapsed.as_micros() as u64)
-                    }
-                    Err(_) => {
-                        // Can't read device directly (permissions) — use fallback
-                        let elapsed = start.elapsed();
-                        Ok(elapsed.as_micros() as u64)
-                    }
-                }
+                let elapsed = start.elapsed();
+                Ok(elapsed.as_micros() as u64)
             }
             Err(_) => {
                 // Device doesn't exist (dev mode) — return synthetic baseline
